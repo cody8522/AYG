@@ -1,0 +1,51 @@
+library(tidyverse)
+library(dplyr)
+library(ggrepel)
+library(ggimage)
+library(nflfastR)
+options(scipen = 9999)
+
+data <- readRDS(url('https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_2020.rds'))
+
+data_up <- data %>%
+  separate(drive_start_yard_line, c("teamyard", "yrdlines"), sep = " ", remove = FALSE, convert = TRUE)%>%
+  mutate("start_FP" = ifelse(teamyard == 50, 50, ifelse(posteam == teamyard, 100 - yrdlines, yrdlines)))%>%
+  mutate("defTDhome" = ifelse(fixed_drive_result == "Opp touchdown", ifelse(posteam == home_team, 0,1),0))%>%
+  mutate("defTDaway" = ifelse(fixed_drive_result == "Opp touchdown", ifelse(posteam == home_team, 1,0),0))
+  
+team_drives <- data_up %>%
+  filter(!is.na(posteam))%>%
+  summarize(play_id, start_FP, ydsnet,drive_play_id_started,game_id, fixed_drive, posteam, drive_game_clock_start, drive_quarter_start, drive_game_clock_end, drive_quarter_end, drive_start_yard_line, drive_end_yard_line, fixed_drive_result,home_team,away_team,home_score,away_score,defTDhome,defTDaway)%>%
+  mutate("opp_TD" = ifelse(fixed_drive_result == "Opp touchdown", 1, 0))%>%
+  mutate("missed_FG" = ifelse(fixed_drive_result == "Missed field goal", 1,0))
+
+team_drives$game_drive <- paste(team_drives$game_id, team_drives$fixed_drive)
+team_drives$first_play <- (team_drives$play_id - team_drives$drive_play_id_started)
+
+team_drives <- team_drives %>%
+  filter(!is.na(start_FP), !is.na(fixed_drive_result))%>%
+  group_by(game_id)%>%
+  mutate("adj_home_score" = home_score + (sum(defTDhome) * -7))%>%
+  mutate("adj_away_score" = away_score + (sum(defTDaway) * -7))%>%
+  summarize(home_score, away_score, adj_home_score, adj_away_score)
+
+
+team_drives <- team_drives %>%
+  filter(first_play == 0) %>%
+  group_by(game_drive) %>%
+  summarize(posteam,game_id, start_FP, ydsnet, drive_game_clock_start, drive_quarter_start, drive_game_clock_end,drive_quarter_end, drive_start_yard_line, drive_end_yard_line, fixed_drive_result, n(),home_team,away_team,home_score,away_score, adj_home_score, adj_away_score, opp_TD, missed_FG, defTDhome = sum(defTDhome), defTDaway= sum(defTDaway))
+team_drives$av_yds_pct <- (team_drives$ydsnet/team_drives$start_FP)
+
+team_drives <- team_drives %>%
+  filter(!is.na(fixed_drive_result))
+
+game_eff <- team_drives %>%
+  filter(!is.na(start_FP))%>%
+  group_by(game_id,posteam) %>%
+  summarize(home_team, away_team, home_score, away_score, mean_AYP = mean(av_yds_pct),total_drives = n(), adj_AYP = mean_AYP * total_drives, opp_TD = sum(opp_TD), missed_FG = sum(missed_FG))%>%
+  arrange(-mean_AYP)%>%
+  mutate("adjFGpoints_h" = ifelse(posteam == home_team, (missed_FG *3) + home_score,home_score))%>%
+  mutate("adjFGpoints_a" = ifelse(posteam == away_team, (missed_FG *3) + away_score,away_score))%>%
+  mutate("adjOTDpoints_h" = ifelse(posteam == away_team, adjFGpoints_h - (opp_TD * 7), adjFGpoints_h))%>%
+  mutate("adjOTDpoints_a" = ifelse(posteam == home_team, adjFGpoints_a - (opp_TD * 7), adjFGpoints_a))
+
