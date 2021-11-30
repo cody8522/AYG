@@ -14,21 +14,32 @@ data <- map_df(seasons, function(x) {
   )
 })
 
-
 data_up <- data %>%
   filter(week <= 17, !is.na(posteam)) %>%
   separate(drive_start_yard_line, c("teamyard", "yrdlines"), sep = " ", remove = FALSE, convert = TRUE)%>%
   mutate(
-"start_FP" = ifelse(teamyard == 50, 50, ifelse(posteam == teamyard, 100 - yrdlines, yrdlines)),
-"first_play" = (drives_AYG$play_id - drives_AYG$drive_play_id_started),
-"points" = ifelse(drives_AYG$fixed_drive_result == "Touchdown", 7, ifelse(drives_AYG$fixed_drive_result == "Field goal", 3, 0)),
-"season" = substr(game_id,1,4),
-av_yds_pct = ydsnet/start_FP)%>%
+    start_FP = ifelse(teamyard == 50, 50, ifelse(posteam == teamyard, 100 - yrdlines, yrdlines)),
+    first_play = play_id - drive_play_id_started,
+    points = case_when (
+    fixed_drive_result == "Touchdown" ~ 7,
+  fixed_drive_result == "Field goal" ~ 3, 
+  TRUE ~ 0
+   ),
+  av_yds_pct = ifelse((ydsnet / start_FP) < -1, -1, ydsnet / start_FP)
+  ) %>%
+  group_by(game_id, posteam, drive)%>%
+  mutate(drive_EPA = sum(epa))%>%
+  ungroup()%>%
+  filter(first_play == 0, !is.na(av_yds_pct))%>%
+  group_by(game_id, posteam) %>%
+  summarize(
+    game_av_yds_pct = sum(av_yds_pct),
+    game_epa = sum(drive_EPA),
+    game_points = sum(points)
+  )%>%
+  ungroup()
 
-group_by(game_id,posteam)%>%
-	summarize(
-		game_av_yds_pct = sum(av_yds_pct), game_epa = sum(epa), game points = sum(points)) %>%
-ungroup()
 
-data_up %>% lm(formula = game_points ~ game_av_yds_pct) %>% summary()
-data_up %>% lm(formula = game_points ~ game_epa) %>% summary() 
+data_up%>%lm(formula = game_points ~ game_av_yds_pct) %>% summary()
+data_up %>% lm(formula = game_points ~ game_epa) %>% summary()
+
