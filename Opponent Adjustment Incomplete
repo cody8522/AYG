@@ -1,0 +1,66 @@
+library(tidyverse)
+library(dplyr)
+library(ggrepel)
+library(ggimage)
+library(nflfastR)
+options(scipen = 9999)
+
+seasons <- 2011:2020
+data <- map_df(seasons, function(x) {
+  readRDS(
+    url(
+      paste0("https://raw.githubusercontent.com/guga31bb/nflfastR-data/master/data/play_by_play_",x,".rds")
+    )
+  )
+})
+
+data_up <- data %>%
+  separate(drive_start_yard_line, c("teamyard", "yrdlines"), sep = " ", remove = FALSE, convert = TRUE)%>%
+  mutate("start_FP" = ifelse(teamyard == 50, 50, ifelse(posteam == teamyard, 100 - yrdlines, yrdlines)))%>%
+  mutate("season" = substr(game_id,1,4))
+
+
+drives_AYG <- data_up %>%
+  filter(!is.na(posteam))%>%
+  summarize(season, week, defteam, play_id, start_FP, ydsnet,drive_play_id_started,game_id, fixed_drive, posteam, drive_game_clock_start, drive_quarter_start, drive_game_clock_end, drive_quarter_end, drive_start_yard_line, drive_end_yard_line, fixed_drive_result,epa)
+drives_AYG$game_drive <- paste(drives_AYG$game_id, drives_AYG$fixed_drive)
+drives_AYG$first_play <- (drives_AYG$play_id - drives_AYG$drive_play_id_started)
+drives_AYG$points <- ifelse(drives_AYG$fixed_drive_result == "Touchdown", 7, ifelse(drives_AYG$fixed_drive_result == "Field goal", 3, 0))
+
+drives_AYG <- drives_AYG %>%
+  filter(first_play == 0) %>%
+  group_by(game_drive) %>%
+  summarize(season, fixed_drive, week, posteam,defteam, start_FP, ydsnet, drive_game_clock_start, drive_quarter_start, drive_game_clock_end,drive_quarter_end, drive_start_yard_line, drive_end_yard_line, fixed_drive_result, points, n(),epa,defteam)
+drives_AYG$av_yds_pct <- (drives_AYG$ydsnet/drives_AYG$start_FP)
+drives_AYG$av_yds_pct <- ifelse(drives_AYG$av_yds_pct < -1, -1, drives_AYG$av_yds_pct)
+
+drives_AYG <- drives_AYG %>%
+  group_by(posteam, week, season)
+
+
+off_AYG <- drives_AYG %>%
+  filter(week <= 17,!is.na(start_FP), !is.na(epa))%>%
+  group_by(posteam, season, week)%>%
+  summarize(defteam = first(defteam), av_yds_pct = sum(av_yds_pct), o_mean_AYG = sum(av_yds_pct)/n(),o_drives = n(), points = sum(points),epa = sum(epa))%>%
+  mutate(lag_off_AYG = lag(o_mean_AYG), cum_AYP = cumsum(av_yds_pct), cum_drives = cumsum(o_drives), cum_AYG = cum_AYP / cum_drives, lead_points = lead(points), lag_cum_AYG = lag(cum_AYG))
+
+
+def_AYG <- off_AYG %>%
+  filter(week <= 17)%>%
+  group_by(defteam, season, week) %>%
+  summarize(d_av_yds_pct = sum(av_yds_pct), d_drives = o_drives, d_mean_AYG = sum(av_yds_pct)/d_drives,d_points = sum(points),epa = sum(epa))%>%
+  mutate(lag_def_AYG = lag(d_mean_AYG), cum_AYP = cumsum(d_av_yds_pct), cum_drives = cumsum(d_drives), cum_AYG = cum_AYP / cum_drives, lag_cum_AYG = lag(cum_AYG))
+  
+total_AYG <- left_join(off_AYG, def_AYG, by = c('defteam', 'week', 'season'))%>%
+  select(posteam, season, week, defteam, av_yds_pct, o_mean_AYG, o_drives, points, cum_AYG.x, lag_cum_AYG.x, d_av_yds_pct, d_mean_AYG, d_drives, lag_def_AYG, cum_AYP.y, cum_drives.y, cum_AYG.y,lag_cum_AYG.y)
+    
+total_AYG %>% lm(formula = o_mean_AYG ~ lag_cum_AYG.x + lag_cum_AYG.y)%>% summary()
+
+
+EPA <- off_AYG %>%
+  filter(week <= 17)%>%
+  group_by(posteam, season, week)%>%
+  summarize(epa, epa_drive = sum(epa)/o_drives, points = sum(points)) %>%
+  mutate(cum_EPA = cumsum(epa), lead_EPA = lead(epa))
+
+EPA %>% lm(formula = points ~ epa_drive)%>% summary()
