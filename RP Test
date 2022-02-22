@@ -1,0 +1,217 @@
+library(tidyverse)
+library(purrr)
+library(curl)
+library(httr)
+library(rvest)
+library(ggplot2)
+library(readxl)
+library(tidymodels)
+library(ranger)
+
+
+Cup = read.csv("Cup2005_2020.csv",sep = ";")
+RP21 = read.csv("Cup21.csv", sep = ";")
+Updated = bind_rows(Cup, RP21)
+Updated$Fastest.Lap.Pct = ((Updated$Fastest.Lap / Updated$Total.Laps) *100)
+round(Updated$Fastest.Lap.Pct, digits = 2)
+Updated$race_ID = paste(substr(Updated$raceID, 4, 7), "_", substr(Updated$raceID, 0, 2), sep = "")
+
+
+Schedule = read.csv("CupSchedule.csv")
+
+CupData <- merge(Updated, Schedule)
+
+CupData <- CupData %>%
+  group_by(Driver, race_ID) %>%
+  arrange(race_ID, Finish)%>%
+  select(Driver, year, race, race_ID,Track,TrackType,Start,Finish, Avg..Pos.,Pass.Diff.,
+         Pct..Quality.Passes,Pct..Top.15.Laps,Pct..Laps.Led,Fastest.Lap.Pct,
+         Total.Laps,Driver.Rating)
+
+RP <- CupData %>%
+  group_by(Driver) %>%
+  arrange(Driver, race_ID)%>%
+  filter(TrackType == 'RP')%>%
+  select(Driver, race_ID, year, race, Track, Start, Finish, Avg..Pos., Pass.Diff.,
+         Pct..Quality.Passes,Pct..Top.15.Laps,Pct..Laps.Led,Fastest.Lap.Pct,
+         Total.Laps,Driver.Rating)%>%
+  mutate(race_count = 1)%>%
+  mutate(race_number = cumsum(race_count))%>%
+  mutate(avg_fin = cumsum(Finish)/race_number)%>%
+  mutate(lag_avg_fin = lag(avg_fin))%>%
+  mutate(avg_DR = cumsum(Driver.Rating)/race_number)%>%
+  mutate(lag_avg_DR = lag(avg_DR))%>%
+  mutate(avg_pos = cumsum(Avg..Pos.)/race_number)%>%
+  mutate(lag_avg_pos = lag(avg_pos))%>%
+  mutate(avg_LLP = cumsum(Pct..Laps.Led)/race_number)%>%
+  mutate(lag_avg_LLP = lag(avg_LLP))%>%
+  mutate(avg_FLP = cumsum(Fastest.Lap.Pct)/race_number)%>%
+  mutate(lag_avg_FLP = lag(avg_FLP))%>%
+  mutate(avg_PQP = cumsum(Pct..Quality.Passes)/race_number)%>%
+  mutate(lag_avg_PQP = cumsum(avg_PQP))
+
+
+############ Adding in 2021 Daytona Field
+Daytona <- RP %>%
+  group_by(Driver)%>%
+  summarize(race_number = last(race_number), lag_avg_fin= last(avg_fin), lag_avg_DR = last(avg_DR), 
+            lag_avg_pos = last(avg_pos), lag_avg_LLP = last(avg_LLP), lag_avg_FLP = last(avg_FLP), lag_avg_PQP =last(avg_PQP))%>%
+  arrange(lag_avg_fin)
+
+Daytona_21 = read.csv("Daytona21.csv")
+
+Daytona_21 <- Daytona_21 %>%
+  left_join(Daytona, by = c('Driver' = 'Driver'))%>%
+  filter(!is.na(lag_avg_fin))%>%
+  arrange(lag_avg_fin)
+
+##################
+
+RP_model <- RP %>%
+  group_by(Driver)%>%
+  arrange(Driver, race_ID)%>%
+  select(Driver, race_ID, year, race, Track, Start, Finish, 
+         lag_avg_fin, lag_avg_DR, lag_avg_pos, lag_avg_LLP, lag_avg_FLP, lag_avg_PQP)%>%
+  filter(!is.na(lag_avg_fin))
+
+##Add in RP races from 2021
+
+RP21 <- RP_model %>%
+  group_by(Driver, race_ID)%>%
+  arrange(race_ID, Finish)%>%
+  filter(year == "2021")
+
+
+set.seed(1234)
+RP_split <- RP_model %>%
+  initial_split(strata = year)
+
+RP_train <- training(RP_split)
+RP_test <- testing(RP_split)
+
+lm_spec <- linear_reg() %>%
+  set_engine(engine = "lm")
+ 
+lm_fit <- lm_spec %>%
+  fit(Finish ~ lag_avg_fin + lag_avg_DR + lag_avg_pos + lag_avg_LLP + lag_avg_FLP + lag_avg_PQP,
+      data = RP_train)
+
+rf_spec <- rand_forest(mode = "regression")%>%
+  set_engine("ranger")
+
+rf_fit <- rf_spec %>%
+  fit(Finish ~ lag_avg_fin + lag_avg_DR + lag_avg_pos + lag_avg_LLP + lag_avg_FLP + lag_avg_PQP,
+      data = RP_train)
+
+results_train <- lm_fit %>%
+  predict(new_data = RP_train) %>%
+  mutate(truth = RP_train$Finish,
+         model = "lm")%>%
+  bind_rows(rf_fit %>%
+              predict(new_data = RP_train) %>%
+              mutate(truth = RP_train$Finish,
+                     model = "rf"))
+
+results_test <- lm_fit %>%
+  predict(new_data = RP_test) %>%
+  mutate(truth = RP_test$Finish,
+         model = "lm")%>%
+  bind_rows(rf_fit %>%
+              predict(new_data = RP_test) %>%
+              mutate(truth = RP_test$Finish,
+                     model = "rf"))
+
+results_train %>%
+  group_by(model)%>%
+  rmse(truth = truth, estimate = .pred)
+
+results_test %>%
+  group_by(model)%>%
+  rmse(truth = truth, estimate = .pred)
+
+results_test %>%
+  mutate(train = "testing")%>%
+  bind_rows(results_train %>%
+              mutate(train = "training"))%>%
+  ggplot(aes(truth, .pred, color = model)) + 
+  geom_abline(lty =2, color = "gray80")+
+  geom_point(alpha = 0.5) +
+  facet_wrap(~train)
+
+set.seed(1234)
+RP_folds <- vfold_cv(RP_train, strata = year)
+
+rf_res <- fit_resamples(
+  rf_spec,
+  Finish ~ Start +lag_avg_fin + lag_avg_DR + lag_avg_pos + lag_avg_LLP + lag_avg_FLP + lag_avg_PQP,
+  RP_folds,
+  control = control_resamples(save_pred = TRUE)
+)
+
+rf_res %>%
+  collect_metrics()
+
+rf_res%>%
+  unnest(.predictions)%>%
+    ggplot(aes(Finish, .pred, color = id)) + 
+  geom_abline(lty =2, color = "gray80")+
+  geom_point(alpha = 0.5)
+
+
+### Edit
+Season_21 = read.csv("RP21.csv")
+Season_21 <- Season_21 %>%
+  
+#Adding 2021 RP Data to Test
+
+RP_test <- lm_fit %>%
+  predict(new_data = RP21) %>%
+  mutate(model = "lm",
+         race_ID = RP21$race_ID,
+         driver = RP21$Driver)%>%
+  bind_rows(rf_fit %>%
+              predict(new_data = RP21) %>%
+              mutate(model = "rf",
+                     race_ID = RP21$race_ID,
+                     driver = RP21$Driver))%>%
+  arrange(.pred)%>%
+  filter(model == "lm")%>%
+  left_join(RP21, by = c('driver' = 'Driver', 'race_ID' = 'race_ID'))%>%
+  arrange(race_ID, .pred)
+
+
+## Predict 2022 Daytona 500
+Daytona <- RP %>%
+  group_by(Driver)%>%
+  summarize(race_number = last(race_number), lag_avg_fin= last(avg_fin), lag_avg_DR = last(avg_DR), 
+            lag_avg_pos = last(avg_pos), lag_avg_LLP = last(avg_LLP), lag_avg_FLP = last(avg_FLP), lag_avg_PQP =last(avg_PQP))%>%
+  arrange(lag_avg_fin)
+
+Daytona_22 = read.csv("Daytona22.csv")
+
+Daytona_22 <- Daytona_22 %>%
+  left_join(Daytona, by = c('Driver' = 'Driver'))%>%
+  filter(!is.na(lag_avg_fin))%>%
+  arrange(lag_avg_fin)
+
+RP_test <- lm_fit %>%
+  predict(new_data = Daytona_22) %>%
+  mutate(model = "lm",
+         driver = Daytona_22$Driver)%>%
+  bind_rows(rf_fit %>%
+              predict(new_data = Daytona_22) %>%
+              mutate(model = "rf",
+                     driver = Daytona_22$Driver))%>%
+  arrange(.pred)%>%
+  filter(model == "lm")%>%
+  left_join(Daytona_22, by = c('driver' = 'Driver'))%>%
+  arrange(.pred)
+
+## PQP is off
+## Figure out prediction list
+
+
+
+RP_model %>% lm(formula = Finish ~ Start + lag_avg_fin + lag_avg_DR +
+                  lag_avg_pos + lag_avg_LLP + lag_avg_FLP + lag_avg_PQP) %>% summary()
+
